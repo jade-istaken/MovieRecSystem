@@ -95,6 +95,23 @@ def recommend_movies(user_id, user_cluster, user_movie_matrix, train_matrix, num
     movie_ids = [movie[0] for movie in top_movies]
     return movies[movies['MovieID'].isin(movie_ids)][['MovieID', 'Title']].values.tolist()
 
+def predict_rating(user_id, movie_id, train_matrix, nn_cluster):
+    if user_id not in train_matrix.index or movie_id not in train_matrix.columns:
+        return train_matrix.mean().mean() #if the user or movie aren't in the data then just. get the average rating across all movies and users
+    scaler = StandardScaler()
+    user_scaled = scaler.fit_transform(train_matrix.loc[[user_id]].fillna(0))
+    dists, idxs = nn_cluster.kneighbors(user_scaled)
+    sim_users = train_matrix.index[idxs[0]]
+    sims = 1 - dists[0]
+
+    #weighted average of neighbor's ratings
+    neighbor_ratings = train_matrix.loc[sim_users, movie_id]
+    valid = neighbor_ratings > 0
+    if valid.sum() == 0:
+        return train_matrix[movie_id].mean()
+    return np.average(neighbor_ratings[valid], weights=sims[valid])
+
+
 
 def ratings_engine(ratings):
     #first make the matrix
@@ -107,6 +124,7 @@ def ratings_engine(ratings):
     test_matrix = user_movie_matrix.loc[test_users]
 
     user_cluster = kmeans_cluster(train_matrix, n_clusters=num_clusters)
+    nn_cluster = nearest_neighbor_cluster(train_matrix, n_neighbors=num_neighbors)
 
 
 
