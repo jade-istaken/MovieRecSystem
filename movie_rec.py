@@ -51,11 +51,50 @@ def kmeans_cluster(X, n_clusters):
     X['cluster'] = kmeans.fit_predict(X_scaled)
     return X['cluster'] #this basically just returns a representation of user ratings
 
+#kind of just a baseline nearest-neighbor predictor
 def nearest_neighbor_cluster(X, n_neighbors):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     nn = NearestNeighbors(n_neighbors=n_neighbors)
     return nn.fit(X_scaled)
+
+def recommend_movies(user_id, user_cluster, user_movie_matrix, train_matrix, num_recs, movies):
+    if user_id not in user_movie_matrix.index:
+        return ["User not found or too few ratings"]
+
+    #get user vector
+    user_vec = user_movie_matrix.loc[[user_id]].fillna(0)
+    scaler = StandardScaler()
+    user_scaled = scaler.transform(user_vec)
+    cluster_id  = user_cluster.get(user_id, -1)
+
+    #find similar users in the same cluster
+    cluster_users = user_cluster[user_cluster == cluster_id].index
+    if len(cluster_users) == 0:
+        cluster_users = train_matrix.index # if there are no other users in the cluster just use all users
+
+    cluster_scaled = scaler.transform(user_movie_matrix.loc[cluster_users].fillna(0))
+    nn_cluster = NearestNeighbors(n_neighbors=num_neighbors, metric='cosine')
+    nn_cluster.fit(cluster_scaled)
+
+    distances, indices = nn_cluster.kneighbors(cluster_scaled)
+    similar_user_ids = user_movie_matrix.loc[cluster_users].index[indices[0]]
+    similarities = 1 - distances[0]
+
+    #aggregate the recommendations from similar users
+    rec_scores = {}
+    for su_id, sim in zip(similar_user_ids, similarities):
+        rated = user_movie_matrix.loc[[su_id]]
+        unseen = rated[rated > 0].drop(user_vec.columns[rated == 0].index)
+        unseen = unseen.drop(user_vec.columns)
+
+        for movie_id, score in unseen.items():
+            rec_scores[movie_id] = rec_scores.get(movie_id, 0) + (score * sim)
+
+    top_movies = sorted(rec_scores.items(), key=lambda x: x[1], reverse=True)[:num_recs]
+    movie_ids = [movie[0] for movie in top_movies]
+    return movies[movies['MovieID'].isin(movie_ids)][['MovieID', 'Title']].values.tolist()
+
 
 def ratings_engine(ratings):
     #first make the matrix
@@ -68,7 +107,6 @@ def ratings_engine(ratings):
     test_matrix = user_movie_matrix.loc[test_users]
 
     user_cluster = kmeans_cluster(train_matrix, n_clusters=num_clusters)
-    nn = NearestNeighbors(n_neighbors=num_neighbors)
 
 
 
