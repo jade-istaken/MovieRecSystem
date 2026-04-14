@@ -7,17 +7,24 @@ from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+
+import matplotlib.pyplot as plt
 
 #global behavioral variables go here 
 dataset_folder = 'dataset'
+min_ratings = 20 #threshold for minimum ratings
+num_neighbors = 10
+num_clusters = 15
+
 
 
 def load_data(dataset_folder):
     user_path = os.path.join(dataset_folder, 'users.dat')
     movie_path = os.path.join(dataset_folder, 'movies.dat')
     rating_path = os.path.join(dataset_folder, 'ratings.dat')
-    print(user_path)
-
     users = pd.read_csv(user_path, sep='::', engine='python', header=None,
                         names=['UserID','Gender','Age','Occupation','Zip'])
     movies = pd.read_csv(movie_path, sep='::', engine='python', header=None, encoding='latin-1',
@@ -28,70 +35,48 @@ def load_data(dataset_folder):
     return users, movies, ratings
 
 def basic_ratings_matrix(ratings):
-    #this basic system just like. tries to predict how a user will rate a given movie
-    
-    
-    #this just makes a matrix where the rows are users, columns are movies, and any given cell is that user's rating for the movie
-    train_matrix = ratings.pivot_table(index="UserID", columns="MovieID", values="Rating")
-      
-    train_filled = train_matrix.fillna(0)
-    sparse_train = csr_matrix(train_filled.values)
-    
-    # Center ratings by user mean to remove bias
-    user_means = train_matrix.mean(axis=1)
-    train_centered = train_matrix.sub(user_means, axis=0).fillna(0)
-    
-    #make an item matrix for seeing how similar movies are 
-    item_matrix = cosine_similarity(sparse_train.T, dense_output=False)
-    
-    return train_matrix, item_matrix, train_centered, user_means 
-    
-def predict_cf(user_id, movie_id, train_matrix, item_matrix, train_centered, user_means):
-    movie_ids = train_matrix.columns.tolist()
-    user_ids = train_matrix.index.tolist()
-    
-    movie_to_idx = {mid: i for i, mid in enumerate(movie_ids)}
-    user_to_idx = {uid: i for i, uid in enumerate(user_ids)}
-    m_idx = movie_to_idx[movie_id]
-    u_idx = user_to_idx[user_id]
-    
-    #fallbacks
-    if movie_id not in movie_to_idx:
-        return user_means.mean()
-    if user_id not in user_to_idx:
-        return user_means.mean()
-    
-    user_vector = train_centered.iloc[u_idx].values
-    item_similarities = item_matrix[m_idx].toarray().flatten()
-    
-    numerator = np.dot(item_similarities, user_vector)
-    denominator = np.abs(item_similarities).sum()
-    
-    if denominator == 0:
-        return user_means.iloc[u_idx]
-    return user_means.iloc[u_idx] + (numerator/denominator)
+    #this creates a matrix of users and movies, with ratings being the values inside them
+    user_movie_matrix = ratings.pivot_table(index='UserID', columns='MovieID', values='Rating')
+
+    #then prune the matrix to only movies with more than x reviews and users with more than x review
+    active_users = user_movie_matrix.count(axis = 1) >= min_ratings
+    active_movies = user_movie_matrix.count(axis = 0) >= min_ratings
+    user_movie_matrix = user_movie_matrix.loc[active_users, active_movies].fillna(0)
+    return user_movie_matrix
+
+def kmeans_cluster(X, n_clusters):
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X) # scale the data because ratings aren't normalized
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
+    X['cluster'] = kmeans.fit_predict(X_scaled)
+    return X['cluster'] #this basically just returns a representation of user ratings
+
+def nearest_neighbor_cluster(X, n_neighbors):
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    nn = NearestNeighbors(n_neighbors=n_neighbors)
+    return nn.fit(X_scaled)
 
 def ratings_engine(ratings):
+    #first make the matrix
+    user_movie_matrix = basic_ratings_matrix(ratings)
+
     #have to do a test/train split (speficy a random state so that it's reproducible
     #during development)
-    train_df, test_df = train_test_split(ratings, test_size=0.2, random_state=42)
-    
-    train_matrix, item_matrix, train_centered, user_means = basic_ratings_matrix(train_df)
-    
-    #this part makes it so that the test is only on user x movie pairs that exist and can, yknow, be tested    
-    test_df = test_df[test_df['MovieID'].isin(train_matrix.columns)]
-    test_df = test_df[test_df['UserID'].isin(train_matrix.index)]
-    
-    test_preds = [predict_cf(row['UserID'], row['MovieID'], train_matrix, item_matrix, train_centered, user_means) for _, row in test_df.iterrows()]
-    rmse = np.sqrt(mean_squared_error(test_df['Rating'], test_preds))
-    mae = mean_absolute_error(test_df['Rating'], test_preds)
-    print(f"RMSE: {rmse:.3f} | MAE: {mae:.3f}")
+    train_users, test_users = train_test_split(user_movie_matrix.index, test_size=0.2, random_state=42)
+    train_matrix = user_movie_matrix.loc[train_users]
+    test_matrix = user_movie_matrix.loc[test_users]
+
+    user_cluster = kmeans_cluster(train_matrix, n_clusters=num_clusters)
+    nn = NearestNeighbors(n_neighbors=num_neighbors)
+
+
 
 def main():
     users, movies, ratings = load_data(dataset_folder)
     ratings_engine(ratings)
     
-    
+
     
 
 if __name__ == '__main__':
