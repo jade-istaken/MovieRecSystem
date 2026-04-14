@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import random
+
 import pandas as pd
 import numpy as np
 import os
@@ -18,8 +20,13 @@ dataset_folder = 'dataset'
 min_ratings = 20 #threshold for minimum ratings
 num_neighbors = 10
 num_clusters = 15
+max_evals = 1000
 
 
+def fit_scaler(x):
+    scaler = StandardScaler()
+    scaler = scaler.fit(x)
+    return scaler
 
 def load_data(dataset_folder):
     user_path = os.path.join(dataset_folder, 'users.dat')
@@ -41,97 +48,138 @@ def basic_ratings_matrix(ratings):
     #then prune the matrix to only movies with more than x reviews and users with more than x review
     active_users = user_movie_matrix.count(axis = 1) >= min_ratings
     active_movies = user_movie_matrix.count(axis = 0) >= min_ratings
-    user_movie_matrix = user_movie_matrix.loc[active_users, active_movies].fillna(0)
-    return user_movie_matrix
+    df = user_movie_matrix.loc[active_users, active_movies].fillna(0)
+    user_ids = df.index.tolist()
+    movie_ids = df.columns.tolist()
+    return df, user_ids, movie_ids
 
-def kmeans_cluster(X, n_clusters):
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X) # scale the data because ratings aren't normalized
+def kmeans_cluster(X, n_clusters, scaler, user_ids):
+    X_scaled = scaler.transform(X) # scale the data because ratings aren't normalized
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
-    X['cluster'] = kmeans.fit_predict(X_scaled)
-    return X['cluster'] #this basically just returns a representation of user ratings
+    cluster_labels = kmeans.fit_predict(X_scaled)
+    return dict(zip(user_ids, cluster_labels)) #this basically just returns a representation of user ratings
 
 #kind of just a baseline nearest-neighbor predictor
-def nearest_neighbor_cluster(X, n_neighbors):
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    nn = NearestNeighbors(n_neighbors=n_neighbors)
+def nearest_neighbor_cluster(X, n_neighbors, scaler):
+    X_scaled = scaler.transform(X)
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine')
     return nn.fit(X_scaled)
 
-def recommend_movies(user_id, user_cluster, user_movie_matrix, train_matrix, num_recs, movies):
-    if user_id not in user_movie_matrix.index:
-        return ["User not found or too few ratings"]
+def recommend_movies(user_id, user_to_cluster, user_ids, scaler, X, train_user_ids, X_train_scaled, movie_ids, movies, n_rec=5):
+    if user_id not in user_to_cluster:
+        return ["User not in training set or too few ratings"]
 
-    #get user vector
-    user_vec = user_movie_matrix.loc[[user_id]].fillna(0)
-    scaler = StandardScaler()
-    user_scaled = scaler.transform(user_vec)
-    cluster_id  = user_cluster.get(user_id, -1)
+    full_idx = user_ids.index(user_id)
+    user_vec_scaled = scaler.transform(X[full_idx].reshape(1, -1))
+    cluster_id = user_to_cluster[user_id]
 
-    #find similar users in the same cluster
-    cluster_users = user_cluster[user_cluster == cluster_id].index
-    if len(cluster_users) == 0:
-        cluster_users = train_matrix.index # if there are no other users in the cluster just use all users
+    # Filter to same cluster
+    cluster_mask = np.array([user_to_cluster.get(uid) == cluster_id for uid in train_user_ids])
+    if cluster_mask.sum() < 5:
+        cluster_mask = np.ones(len(train_user_ids), dtype=bool)
 
-    cluster_scaled = scaler.transform(user_movie_matrix.loc[cluster_users].fillna(0))
-    nn_cluster = NearestNeighbors(n_neighbors=num_neighbors, metric='cosine')
-    nn_cluster.fit(cluster_scaled)
+    X_cluster = X_train_scaled[cluster_mask]
+    nn_cluster = NearestNeighbors(n_neighbors=min(10, X_cluster.shape[0]), metric='cosine', algorithm='brute')
+    nn_cluster.fit(X_cluster)
 
-    distances, indices = nn_cluster.kneighbors(cluster_scaled)
-    similar_user_ids = user_movie_matrix.loc[cluster_users].index[indices[0]]
-    similarities = 1 - distances[0]
+    dists, idxs = nn_cluster.kneighbors(user_vec_scaled)
+    similarities = 1 - dists[0]
 
-    #aggregate the recommendations from similar users
     rec_scores = {}
-    for su_id, sim in zip(similar_user_ids, similarities):
-        rated = user_movie_matrix.loc[[su_id]]
-        unseen = rated[rated > 0].drop(user_vec.columns[rated == 0].index)
-        unseen = unseen.drop(user_vec.columns)
+    cluster_train_user_ids = [uid for uid, mask in zip(train_user_ids, cluster_mask) if mask]
 
-        for movie_id, score in unseen.items():
-            rec_scores[movie_id] = rec_scores.get(movie_id, 0) + (score * sim)
+    for i, sim in zip(idxs[0], similarities):
+        su_id = cluster_train_user_ids[i]
+        su_full_idx = user_ids.index(su_id)
+        su_vec = X[su_full_idx]
 
-    top_movies = sorted(rec_scores.items(), key=lambda x: x[1], reverse=True)[:num_recs]
-    movie_ids = [movie[0] for movie in top_movies]
-    return movies[movies['MovieID'].isin(movie_ids)][['MovieID', 'Title']].values.tolist()
+        target_rated = np.where(X[full_idx] > 0)[0]
+        similar_rated = np.where(su_vec > 0)[0]
+        unseen_indices = np.setdiff1d(similar_rated, target_rated)
 
-def predict_rating(user_id, movie_id, train_matrix, nn_cluster):
-    if user_id not in train_matrix.index or movie_id not in train_matrix.columns:
-        return train_matrix.mean().mean() #if the user or movie aren't in the data then just. get the average rating across all movies and users
-    scaler = StandardScaler()
-    user_scaled = scaler.fit_transform(train_matrix.loc[[user_id]].fillna(0))
-    dists, idxs = nn_cluster.kneighbors(user_scaled)
-    sim_users = train_matrix.index[idxs[0]]
-    sims = 1 - dists[0]
+        for midx in unseen_indices:
+            mid = movie_ids[midx]
+            rec_scores[mid] = rec_scores.get(mid, 0) + (su_vec[midx] * sim)
+
+    top_movies = sorted(rec_scores.items(), key=lambda x: x[1], reverse=True)[:n_rec]
+    top_ids = [m[0] for m in top_movies]
+    return movies[movies['MovieID'].isin(top_ids)][['MovieID', 'Title']].values.tolist()
+
+def predict_rating(user_id, movie_id, X_train, movie_ids, user_ids, scaler, X, nn):
+    if movie_id not in movie_ids:
+        return np.mean(X_train)
+    try:
+        full_user_idx = user_ids.index(user_id)
+    except ValueError:
+        return np.mean(X_train) #if the user or movie aren't in the data then just. get the average rating across all movies and users
+    full_movie_idx = movie_ids.index(movie_id)
+    user_vec_scaled = scaler.transform(X[full_user_idx].reshape(1, -1))
+
+    dists, idxs = nn.kneighbors(user_vec_scaled)
+    similarities = 1 - dists[0]
 
     #weighted average of neighbor's ratings
-    neighbor_ratings = train_matrix.loc[sim_users, movie_id]
+    neighbor_ratings = X_train[idxs[0], full_movie_idx]
     valid = neighbor_ratings > 0
     if valid.sum() == 0:
-        return train_matrix[movie_id].mean()
-    return np.average(neighbor_ratings[valid], weights=sims[valid])
+        return np.mean(X_train[:, full_movie_idx])
+    return np.average(neighbor_ratings[valid], weights=similarities[valid])
 
 
 
-def ratings_engine(ratings):
+def ratings_engine(users, movies, ratings):
     #first make the matrix
-    user_movie_matrix = basic_ratings_matrix(ratings)
+    user_movie_matrix, user_ids, movie_ids = basic_ratings_matrix(ratings)
+
+    #strip only the values out
+    X = user_movie_matrix.values
 
     #have to do a test/train split (speficy a random state so that it's reproducible
     #during development)
-    train_users, test_users = train_test_split(user_movie_matrix.index, test_size=0.2, random_state=42)
-    train_matrix = user_movie_matrix.loc[train_users]
-    test_matrix = user_movie_matrix.loc[test_users]
-
-    user_cluster = kmeans_cluster(train_matrix, n_clusters=num_clusters)
-    nn_cluster = nearest_neighbor_cluster(train_matrix, n_neighbors=num_neighbors)
+    train_idx, test_idx = train_test_split(np.arange(len(user_ids)), test_size=0.2, random_state=42)
+    X_train, X_test = X[train_idx], X[test_idx]
+    train_user_ids = [user_ids[i] for i in train_idx]
+    test_user_ids = [user_ids[i] for i in test_idx]
 
 
+    #make a scaler for everything
+    scaler = StandardScaler()
+    scaler.fit(X_train)
+    X_train_scaled = scaler.transform(X_train)
+
+    user_cluster_dict = kmeans_cluster(X_train, n_clusters=num_clusters, scaler=scaler, user_ids=train_user_ids)
+    nn_cluster = nearest_neighbor_cluster(X_train, n_neighbors=num_neighbors, scaler=scaler)
+
+    test_actuals = []
+    test_preds = []
+
+    # Predict test ratings for evaluation
+    for i in range(X_test.shape[0]):
+        u_id = test_user_ids[i]
+        rated_movie_cols = np.where(X_test[i] > 0)[0]
+        for j in rated_movie_cols:
+            m_id = movie_ids[j]
+            actual = X_test[i, j]
+            pred = predict_rating(u_id, m_id, X_train, movie_ids, user_ids, scaler, X, nn_cluster)
+            test_actuals.append(actual)
+            test_preds.append(pred)
+            if len(test_actuals) >= max_evals:
+                break
+        if len(test_actuals) >= max_evals:
+            break
+
+    if len(test_actuals) > 0:
+        rmse = np.sqrt(mean_squared_error(test_actuals, test_preds))
+        print(f"Sample RMSE: {rmse:.3f}")
+
+    target_user = train_user_ids[random.randint(0, len(train_user_ids) - 1)]
+    print(f"\nTop 5 recommendations for User {target_user}:")
+    for mid, title in recommend_movies(target_user, n_rec=5, user_to_cluster=user_cluster_dict, user_ids=user_ids, scaler=scaler, X=X, train_user_ids=train_user_ids, X_train_scaled=X_train_scaled,movies=movies, movie_ids=movie_ids):
+        print(f"- {title} (ID: {mid})")
 
 def main():
     users, movies, ratings = load_data(dataset_folder)
-    ratings_engine(ratings)
-    
+    ratings_engine(users, movies, ratings)
 
     
 
