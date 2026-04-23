@@ -18,14 +18,14 @@ import matplotlib.pyplot as plt
 #global behavioral variables go here 
 dataset_folder = 'dataset'
 min_ratings = 20 #threshold for minimum ratings
-num_neighbors = 10
+num_neighbors = 13
 num_clusters = 15
-max_evals = 1000
+max_evals = 500
 
 
 def fit_scaler(x):
     scaler = StandardScaler()
-    scaler = scaler.fit(x)
+    scaler = scaler.fnn_clusterit(x)
     return scaler
 
 def load_data(dataset_folder):
@@ -58,6 +58,29 @@ def kmeans_cluster(X, n_clusters, scaler, user_ids):
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, init='k-means++')
     cluster_labels = kmeans.fit_predict(X_scaled)
     return dict(zip(user_ids, cluster_labels)) #this basically just returns a representation of user ratings
+
+def wcss(X, max_k):
+    wcss = []
+    for i in range(1, max_k+1):
+        kmeans = KMeans(n_clusters=i, init='k-means++')
+        kmeans.fit(X)
+        wcss.append(kmeans.inertia_)
+    return wcss
+
+def kmeans_elbow(X, scaler):
+    wcss_vals = []
+    X_scaled = scaler.transform(X)
+    max_k=30
+    #because kmeans is semi-stochastic, taking averages is useful in finding the elbow
+    for i in range(1, 15):
+        print(f"WCSS pass {i} of 15")
+        wcss_vals.append(wcss(X_scaled, max_k))
+    avg_wcss = np.mean(wcss_vals,axis=0)
+    plt.plot(range(1,max_k+1), avg_wcss)
+    plt.xlabel("Number of clusters")
+    plt.ylabel("WCSS")
+    plt.show()
+
 
 #kind of just a baseline nearest-neighbor predictor
 def nearest_neighbor_cluster(X, n_neighbors, scaler):
@@ -146,6 +169,8 @@ def ratings_engine(users, movies, ratings):
     scaler = StandardScaler()
     scaler.fit(X_train)
     X_train_scaled = scaler.transform(X_train)
+    
+    #kmeans_elbow(X_train, scaler)
 
     user_cluster_dict = kmeans_cluster(X_train, n_clusters=num_clusters, scaler=scaler, user_ids=train_user_ids)
     nn_cluster = nearest_neighbor_cluster(X_train, n_neighbors=num_neighbors, scaler=scaler)
