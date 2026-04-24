@@ -16,10 +16,11 @@ from sklearn.base import BaseEstimator, ClusterMixin
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold
 
 #global behavioral variables go here 
 dataset_folder = 'dataset'
-min_ratings = 20 #threshold for minimum ratings
+min_ratings = 5 #threshold for minimum ratings
 num_neighbors = 13
 num_clusters = 15
 
@@ -68,6 +69,8 @@ class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._n_clusters_found_ = len(np.unique(cluster_labels))
         print(f"found {self._n_clusters_found_} user taste clusters")
         self._nn.fit(self._X_scaled)
+        #compute the biases just as a benchmark
+        self._compute_biases(ratings_df, lambda_reg=15)
         
         self.is_fitted_ = True
         return self
@@ -218,7 +221,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
 
         # CF estimators
         self._scaler = StandardScaler()
-        self._meanshift = MeanShift(bin_seeding=True, cluster_all=True, n_jobs=-1, bandwidth=30)
+        self._meanshift = MeanShift(bin_seeding=True, cluster_all=True, n_jobs=-1)
         self._nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine', algorithm='brute')
         
         # Content estimators
@@ -253,7 +256,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._n_clusters_found_ = len(np.unique(self._meanshift.labels_))
         print(f"MeanShift found {self._n_clusters_found_} taste clusters.")
         self._nn.fit(self._X_scaled)
-
+        self._compute_biases(ratings_df, lambda_reg=15)
         """Content-Based Setup"""
         self._all_movie_ids = movies_df['MovieID'].tolist()
         self._movie_to_all_idx = {mid: i for i, mid in enumerate(self._all_movie_ids)}
@@ -402,7 +405,104 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         top_mid = unseen_movie_ids[top_indices]
         
         return self._movies_df[self._movies_df['MovieID'].isin(top_mid)][['MovieID', 'Title']].values.tolist()
+    def _compute_biases(self, ratings_df, lambda_reg=15):
+        """Compute user and item biases via regularized alternating least squares."""
+        # Initialize
+        self._user_bias = np.zeros(len(self._user_ids))
+        self._item_bias = np.zeros(len(self._movie_ids))
+        
+        # Build lookup for fast access
+        user_to_row = {uid: i for i, uid in enumerate(self._user_ids)}
+        movie_to_col = {mid: j for j, mid in enumerate(self._movie_ids)}
+        
+        # Filter to active users/movies only
+        active_ratings = ratings_df[
+            (ratings_df['UserID'].isin(self._user_ids)) & 
+            (ratings_df['MovieID'].isin(self._movie_ids))
+        ].copy()
+        
+        if active_ratings.empty:
+            return
+            
+        # Convert to 0-based indices
+        active_ratings['u_idx'] = active_ratings['UserID'].map(user_to_row)
+        active_ratings['i_idx'] = active_ratings['MovieID'].map(movie_to_col)
+        active_ratings = active_ratings.dropna(subset=['u_idx', 'i_idx'])
+        
+        # Alternating Least Squares (5 iterations is usually enough)
+        for _ in range(5):
+            # Update user biases
+            for u_idx in range(len(self._user_ids)):
+                user_data = active_ratings[active_ratings['u_idx'] == u_idx]
+                if len(user_data) == 0:
+                    continue
+                residuals = user_data['Rating'].values - self._global_mean - self._item_bias[user_data['i_idx'].values]
+                self._user_bias[u_idx] = residuals.sum() / (lambda_reg + len(user_data))
+            
+            # Update item biases
+            for i_idx in range(len(self._movie_ids)):
+                item_data = active_ratings[active_ratings['i_idx'] == i_idx]
+                if len(item_data) == 0:
+                    continue
+                residuals = item_data['Rating'].values - self._global_mean - self._user_bias[item_data['u_idx'].values]
+                self._item_bias[i_idx] = residuals.sum() / (lambda_reg + len(item_data))
+    
+    def predict_bias(self, user_id, movie_id):
+        """Bias baseline prediction: μ + b_u + b_i"""
+        if not getattr(self, 'is_fitted_', False):
+            return self._global_mean
+            
+        # Cold-start fallback
+        if user_id not in self._user_to_idx or movie_id not in self._movie_to_idx:
+            return self._global_mean
+            
+        u_idx = self._user_to_idx[user_id]
+        m_idx = self._movie_to_idx[movie_id]
+        
+        pred = self._global_mean + self._user_bias[u_idx] + self._item_bias[m_idx]
+        return np.clip(pred, 1, 5)  # Ensure rating stays in valid range
 
+def cross_validate_recommender(model_class, ratings_df, movies_df, n_splits=5, **model_params):
+    """Run K-Fold CV on explicit ratings. Returns list of fold RMSEs."""
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    fold_scores = []
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(ratings_df)):
+        train_df = ratings_df.iloc[train_idx]
+        test_df = ratings_df.iloc[test_idx]
+        
+        try:
+            # Instantiate & fit fresh model per fold
+            model = model_class(**model_params)
+            model.fit(train_df, movies_df)
+            
+            # Filter test to only users/movies seen during training
+            valid_test = test_df[
+                (test_df['UserID'].isin(model._user_ids)) & 
+                (test_df['MovieID'].isin(model._movie_ids))
+            ]
+            
+            if len(valid_test) < 20:
+                print(f"⚠️ Fold {fold_idx+1}: Skipped (too few valid test pairs)")
+                continue
+                
+            # Fast vectorized prediction
+            preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values)
+            rmse = np.sqrt(mean_squared_error(valid_test['Rating'].values, preds))
+            fold_scores.append(rmse)
+            # print(f"Fold {fold_idx+1}: RMSE = {rmse:.3f} ({len(valid_test)} pairs)")
+            
+        except Exception as e:
+            print(f"Fold {fold_idx+1} failed: {e}")
+            
+    if not fold_scores:
+        raise RuntimeError("No folds produced valid results. Check min_ratings threshold or data sparsity.")
+        
+    mean_rmse = np.mean(fold_scores)
+    std_rmse = np.std(fold_scores)
+    print("Cross-Validation Complete:")
+    print(f"   Mean RMSE: {mean_rmse:.3f} ± {std_rmse:.3f}")
+    return fold_scores
 
 def load_data(dataset_folder):
     user_path = os.path.join(dataset_folder, 'users.dat')
@@ -452,17 +552,38 @@ def main():
     print(f"Predicted rating for User {sample_user} on Movie {sample_movie}: {model.predict(sample_user, sample_movie):.2f}")
     print(f"\nTop 5 recommendations for User {sample_user}:")
     for mid, title in model.recommend(sample_user, n_rec=5):
-        print(f"- {title} (ID: {mid})")
-        
-    valid_test = test_ratings[
-    (test_ratings['UserID'].isin(model._user_ids)) & 
-    (test_ratings['MovieID'].isin(model._movie_ids))
-    ]
-    
+        print(f"- {title} (ID: {mid})")    
 
-    preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values)
-    rmse = np.sqrt(mean_squared_error(valid_test['Rating'].values, preds))
-    print(f"Vectorized RMSE: {rmse:.3f}")
+    param_grid = {
+        'n_neighbors': [19, 20, 25],
+        'min_ratings': [19, 20, 25],
+        'alpha': [0.9]
+    }
+    
+    best_mean_rmse = float('inf')
+    best_params = None
+    results = []
+    
+    for n_n in param_grid['n_neighbors']:
+        for min_r in param_grid['min_ratings']:
+            for a in param_grid['alpha']:
+                print(f"\n🔍 Evaluating: n_neighbors={n_n}, min_ratings={min_r}, alpha={a}")
+                try:
+                    scores = cross_validate_recommender(
+                        HybridUserClusterKNNRecommender,
+                        ratings, movies,
+                        n_splits=5,
+                        n_neighbors=n_n, min_ratings=min_r, alpha=a
+                    )
+                    mean_r = np.mean(scores)
+                    results.append({'n_neighbors': n_n, 'min_ratings': min_r, 'alpha': a, 'mean_rmse': mean_r})
+                    if mean_r < best_mean_rmse:
+                        best_mean_rmse = mean_r
+                        best_params = {'n_neighbors': n_n, 'min_ratings': min_r, 'alpha': a}
+                except Exception as e:
+                    print(f"   Skipped: {e}")
+    
+    print(f"\n🏆 Best CV RMSE: {best_mean_rmse:.3f} | Params: {best_params}")
 
 if __name__ == '__main__':
     main()
