@@ -21,7 +21,6 @@ dataset_folder = 'dataset'
 min_ratings = 20 #threshold for minimum ratings
 num_neighbors = 13
 num_clusters = 15
-max_evals = 1000
 
 class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
     def __init__(self, n_clusters=15, n_neighbors=10, min_ratings=20, random_state=42):
@@ -36,34 +35,32 @@ class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine', algorithm='brute')
 
     def fit(self, ratings_df, movies_df, y=None):
-        """Train the recommender on ratings and movie metadata."""
-        # 1. Build user-movie matrix
+        # Build & filter matrix
         user_movie = ratings_df.pivot_table(index='UserID', columns='MovieID', values='Rating')
-        
-        # 2. Filter active users/movies to reduce noise
         active_users = user_movie.count(axis=1) >= self.min_ratings
         active_movies = user_movie.count(axis=0) >= self.min_ratings
         df = user_movie.loc[active_users, active_movies].fillna(0)
-        
         if df.empty:
             raise ValueError("No users/movies meet the min_ratings threshold.")
             
-        # 3. Store mappings & convert to numpy (bypasses pandas feature validation)
-        self._user_ids = df.index.tolist()
-        self._movie_ids = df.columns.tolist()
+        # Precompute Values
+        self._user_ids = [int(uid) for uid in df.index]
+        self._movie_ids = [int(mid) for mid in df.columns]
         self._X = df.values
         self._movies_df = movies_df.copy()
+        self._global_mean = float(np.mean(self._X[self._X > 0]))
         
-        # 4. Scale & Cluster users by taste
+        # Precompute lookup structures
+        self._valid_user_ids = set(self._user_ids)
+        self._valid_movie_ids = set(self._movie_ids)
+        self._user_to_idx = {uid: i for i, uid in enumerate(self._user_ids)}
+        self._movie_to_idx = {mid: i for i, mid in enumerate(self._movie_ids)}
+        
+        # Scale, Cluster, & Fit NN
         self._X_scaled = self._scaler.fit_transform(self._X)
-        cluster_labels = self._kmeans.fit_predict(self._X_scaled)
-        self._user_to_cluster = dict(zip(self._user_ids, cluster_labels))
-        
-        # 5. Fit Nearest Neighbors on scaled data
+        self._user_to_cluster = dict(zip(self._user_ids, self._kmeans.fit_predict(self._X_scaled)))
         self._nn.fit(self._X_scaled)
         
-        # Precompute global mean for cold-start fallbacks
-        self._global_mean = np.mean(self._X[self._X > 0])
         self.is_fitted_ = True
         return self
 
@@ -93,7 +90,73 @@ class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
             return np.mean(movie_ratings[valid_movie]) if valid_movie.sum() > 0 else self._global_mean
             
         return np.average(neighbor_ratings[valid], weights=similarities[valid])
-
+    
+    def predict_batch(self, user_ids, movie_ids):
+        """Vectorized rating prediction for multiple user-movie pairs."""
+        if not getattr(self, 'is_fitted_', False):
+            raise RuntimeError("Estimator not fitted. Call .fit() first.")
+            
+        # Force inputs to standard Python ints to match dict keys
+        user_ids = np.array([int(u) for u in user_ids], dtype=int)
+        movie_ids = np.array([int(m) for m in movie_ids], dtype=int)
+        predictions = np.full(len(user_ids), self._global_mean)
+        
+        # Vectorized validation using boolean indexing
+        valid_mask = np.array([
+            (u in self._valid_user_ids) and (m in self._valid_movie_ids)
+            for u, m in zip(user_ids, movie_ids)
+        ])
+        
+        if not np.any(valid_mask):
+            return predictions
+            
+        v_users = user_ids[valid_mask]
+        v_movies = movie_ids[valid_mask]
+        
+        # Precompute item means for fallback
+        item_ratings_sum = np.sum(self._X, axis=0)
+        item_ratings_count = np.sum(self._X > 0, axis=0)
+        item_means = np.where(item_ratings_count > 0, 
+                              item_ratings_sum / item_ratings_count, 
+                              self._global_mean)
+        
+        # Group by unique users to minimize NN calls
+        unique_users, inverse_indices = np.unique(v_users, return_inverse=True)
+        predictions_valid = np.empty(len(v_users))
+        
+        # Batch scale & find neighbors
+        unique_full_indices = [self._user_to_idx[uid] for uid in unique_users]
+        X_unique_scaled = self._scaler.transform(self._X[unique_full_indices])
+        dists_all, neighbors_all = self._nn.kneighbors(X_unique_scaled)
+        similarities_all = 1 - dists_all
+        
+        # Compute predictions per unique user
+        for u_idx, u_id in enumerate(unique_users):
+            sims = similarities_all[u_idx]
+            neighbor_indices = neighbors_all[u_idx]
+            
+            user_positions = np.where(inverse_indices == u_idx)[0]
+            target_movie_ids = v_movies[user_positions]
+            
+            target_movie_indices = np.array([self._movie_to_idx[mid] for mid in target_movie_ids])
+            
+            neighbor_ratings = self._X[neighbor_indices][:, target_movie_indices]
+            valid_mask_movies = neighbor_ratings > 0
+            
+            weights = sims[:, np.newaxis] * valid_mask_movies
+            numerators = np.sum(weights * neighbor_ratings, axis=0)
+            denominators = np.sum(weights, axis=0)
+            
+            preds = np.where(denominators > 0, 
+                             numerators / denominators, 
+                             item_means[target_movie_indices])
+            
+            predictions_valid[user_positions] = preds
+            
+        predictions[valid_mask] = predictions_valid
+        return predictions
+        
+        
     def recommend(self, user_id, n_rec=5):
         """Return top-N recommended movies for a user."""
         if not getattr(self, 'is_fitted_', False):
@@ -177,25 +240,28 @@ def kmeans_elbow(X, scaler):
 
 def main():
     users, movies, ratings = load_data(dataset_folder)
-    train_users, test_users = train_test_split(ratings['UserID'].unique(), test_size=0.2, random_state=42)
-    train_ratings = ratings[ratings['UserID'].isin(train_users)]
+    train_ratings, test_ratings = train_test_split(ratings, test_size=0.2, random_state=42)
+
     
     model = UserClusterKNNRecommender(n_clusters=num_clusters, n_neighbors=num_neighbors, min_ratings=min_ratings)
     model.fit(train_ratings, movies)
     
-    sample_user = train_users[0]
+    sample_user = 2486
     sample_movie = model._movie_ids[0]
     print(f"Predicted rating for User {sample_user} on Movie {sample_movie}: {model.predict(sample_user, sample_movie):.2f}")
     print(f"\nTop 5 recommendations for User {sample_user}:")
     for mid, title in model.recommend(sample_user, n_rec=5):
         print(f"- {title} (ID: {mid})")
-
+        
+    valid_test = test_ratings[
+    (test_ratings['UserID'].isin(model._user_ids)) & 
+    (test_ratings['MovieID'].isin(model._movie_ids))
+    ]
     
-    test_ratings_subset = ratings[ratings['UserID'].isin(test_users)].head(500)  # sample for speed
-    preds = [model.predict(row.UserID, row.MovieID) for _, row in test_ratings_subset.iterrows()]
-    actuals = test_ratings_subset['Rating'].values
-    rmse = np.sqrt(mean_squared_error(actuals, preds))
-    print(f"\nSample RMSE: {rmse:.3f}")
+
+    preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values)
+    rmse = np.sqrt(mean_squared_error(valid_test['Rating'].values, preds))
+    print(f"Vectorized RMSE: {rmse:.3f}")
 
 if __name__ == '__main__':
     main()
