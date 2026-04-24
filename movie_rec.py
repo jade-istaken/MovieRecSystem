@@ -5,11 +5,10 @@ import random
 import pandas as pd
 import numpy as np
 import os
-from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_squared_error
 from sklearn.cluster import KMeans
+from sklearn.cluster import MeanShift
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator, ClusterMixin
@@ -32,9 +31,12 @@ class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         # Internal sklearn estimators
         self._scaler = StandardScaler()
         self._kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+        # add meanshift so we don't have to tune the cluster amount
+        self._meanshift = MeanShift(bin_seeding=True, cluster_all=True, bandwidth=25)
         self._nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine', algorithm='brute')
 
     def fit(self, ratings_df, movies_df, y=None):
+        """Fit the model on rating and movie data"""
         # Build & filter matrix
         user_movie = ratings_df.pivot_table(index='UserID', columns='MovieID', values='Rating')
         active_users = user_movie.count(axis=1) >= self.min_ratings
@@ -58,7 +60,11 @@ class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         
         # Scale, Cluster, & Fit NN
         self._X_scaled = self._scaler.fit_transform(self._X)
-        self._user_to_cluster = dict(zip(self._user_ids, self._kmeans.fit_predict(self._X_scaled)))
+        self._meanshift.fit(self._X_scaled)
+        cluster_labels = self._meanshift.labels_
+        self._user_to_cluster = dict(zip(self._user_ids, cluster_labels))
+        self._n_clusters_found_ = len(np.unique(cluster_labels))
+        print(f"found {self._n_clusters_found_} user taste clusters")
         self._nn.fit(self._X_scaled)
         
         self.is_fitted_ = True
