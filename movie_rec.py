@@ -19,12 +19,13 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
 
 from plotting import generate_coverage_report
+from grid_search_viz import generate_grid_search_report
 
 #global behavioral variables go here 
 dataset_folder = 'dataset'
-min_ratings = 5 #threshold for minimum ratings
+min_ratings = 30 #threshold for minimum ratings
 num_neighbors = 25
-alpha=0.9
+alpha=0.75
 
 
 class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
@@ -72,7 +73,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._meanshift.fit(self._X_scaled)
         self._user_to_cluster = dict(zip(self._user_ids, self._meanshift.labels_))
         self._n_clusters_found_ = len(np.unique(self._meanshift.labels_))
-        print(f"MeanShift found {self._n_clusters_found_} taste clusters.")
+        # print(f"MeanShift found {self._n_clusters_found_} taste clusters.")
         self._nn.fit(self._X_scaled)
         self._compute_biases(ratings_df, lambda_reg=15)
         """Content-Based Setup"""
@@ -449,38 +450,60 @@ def run_alpha_sweep(train_ratings, test_ratings, movies):
     
     # test different levels of content/CF blending
     alphas = [0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]
+    alpha_scores = []
     for a in alphas:
         preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values, alpha=a)
         rmse = np.sqrt(mean_squared_error(valid_test['Rating'], preds))
         nans = np.isnan(preds).sum()
         print(f"α={a:.2f} | RMSE={rmse:.3f} | NaNs={nans}")
+        alpha_scores.append(rmse)
+    plt.plot(alphas, alpha_scores)
+    return alpha_scores
 
 def run_alpha_sweep_cross(ratings,movies):
     alphas = [0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]
+    alpha_scores = []
+    alpha_stds = []
     for a in alphas:
         score = cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies,5, alpha, n_neighbors=num_neighbors, min_ratings=min_ratings)
         mean_rmse = np.mean(score)
         rmse_std = np.std(score)
         print(f"α={a:.2f} | RMSE={mean_rmse:.3f} +/- {rmse_std:.3f}")
+        alpha_scores.append(mean_rmse)
+        alpha_stds.append(rmse_std)
+    return alpha_scores, alpha_stds
+        
 
     
 def main():
     users, movies, ratings = load_data(dataset_folder)
     train_ratings, test_ratings = train_test_split(ratings, test_size=0.2, random_state=42)
     
-    report = generate_coverage_report(
-    ratings_df=ratings,
-    movies_df=movies,
-    alpha=0.7,
-    output_plot=True,  # Saves PNG/PDF automatically
-    verbose=True
-    )
+    #commented out block of code for finding the best min_Ratings number
+    # report = generate_coverage_report(
+    # ratings_df=ratings,
+    # movies_df=movies,
+    # alpha=alpha,
+    # output_plot=True,  # Saves PNG/PDF automatically
+    # verbose=True
+    # )
     
-    # Access results
-    print(f"Best RMSE: {report['results_df']['rmse'].min():.3f}")
-    if 'sweet_spot' in report:
-        print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
-        
+    # # Access results
+    # print(f"Best RMSE: {report['results_df']['rmse'].min():.3f}")
+    # if 'sweet_spot' in report:
+    #     print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
+    
+    #generate grid search results
+    report = generate_grid_search_report(
+        model_class=HybridUserClusterKNNRecommender,
+        ratings_df=ratings,
+        movies_df=movies,
+        min_ratings_values=[5, 10, 20, 30, 50],
+        n_neighbors_values=[5, 10, 20, 30, 50],
+        alpha=0.75,
+        n_splits=5,  # Use 5 for final report
+        verbose=True
+    )
 
     
 if __name__ == '__main__':
