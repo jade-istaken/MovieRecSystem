@@ -18,200 +18,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
 
+from plotting import generate_coverage_report
+
 #global behavioral variables go here 
 dataset_folder = 'dataset'
 min_ratings = 5 #threshold for minimum ratings
-num_neighbors = 13
-num_clusters = 15
+num_neighbors = 25
+alpha=0.9
 
-class UserClusterKNNRecommender(BaseEstimator, ClusterMixin):
-    def __init__(self, n_clusters=15, n_neighbors=10, min_ratings=20, random_state=42):
-        self.n_clusters = n_clusters
-        self.n_neighbors = n_neighbors
-        self.min_ratings = min_ratings
-        self.random_state = random_state
-
-        # Internal sklearn estimators
-        self._scaler = StandardScaler()
-        self._kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
-        # add meanshift so we don't have to tune the cluster amount
-        self._meanshift = MeanShift(bin_seeding=True, cluster_all=True, bandwidth=25)
-        self._nn = NearestNeighbors(n_neighbors=n_neighbors, metric='cosine', algorithm='brute')
-
-    def fit(self, ratings_df, movies_df, y=None):
-        """Fit the model on rating and movie data"""
-        # Build & filter matrix
-        user_movie = ratings_df.pivot_table(index='UserID', columns='MovieID', values='Rating')
-        active_users = user_movie.count(axis=1) >= self.min_ratings
-        active_movies = user_movie.count(axis=0) >= self.min_ratings
-        df = user_movie.loc[active_users, active_movies].fillna(0)
-        if df.empty:
-            raise ValueError("No users/movies meet the min_ratings threshold.")
-            
-        # Precompute Values
-        self._user_ids = [int(uid) for uid in df.index]
-        self._movie_ids = [int(mid) for mid in df.columns]
-        self._X = df.values
-        self._movies_df = movies_df.copy()
-        self._global_mean = float(np.mean(self._X[self._X > 0]))
-        
-        # Precompute lookup structures
-        self._valid_user_ids = set(self._user_ids)
-        self._valid_movie_ids = set(self._movie_ids)
-        self._user_to_idx = {uid: i for i, uid in enumerate(self._user_ids)}
-        self._movie_to_idx = {mid: i for i, mid in enumerate(self._movie_ids)}
-        
-        # Scale, Cluster, & Fit NN
-        self._X_scaled = self._scaler.fit_transform(self._X)
-        self._meanshift.fit(self._X_scaled)
-        cluster_labels = self._meanshift.labels_
-        self._user_to_cluster = dict(zip(self._user_ids, cluster_labels))
-        self._n_clusters_found_ = len(np.unique(cluster_labels))
-        print(f"found {self._n_clusters_found_} user taste clusters")
-        self._nn.fit(self._X_scaled)
-        #compute the biases just as a benchmark
-        self._compute_biases(ratings_df, lambda_reg=15)
-        
-        self.is_fitted_ = True
-        return self
-
-    def predict(self, user_id, movie_id):
-        """Predict rating for a user-movie pair."""
-        if not getattr(self, 'is_fitted_', False):
-            raise RuntimeError("Estimator not fitted. Call .fit() first.")
-            
-        # Cold-start fallback
-        if user_id not in self._user_to_cluster or movie_id not in self._movie_ids:
-            return self._global_mean
-            
-        full_user_idx = self._user_ids.index(user_id)
-        full_movie_idx = self._movie_ids.index(movie_id)
-        
-        user_vec_scaled = self._scaler.transform(self._X[full_user_idx].reshape(1, -1))
-        dists, idxs = self._nn.kneighbors(user_vec_scaled)
-        similarities = 1 - dists[0]
-        
-        neighbor_ratings = self._X[idxs[0], full_movie_idx]
-        valid = neighbor_ratings > 0
-        
-        if valid.sum() == 0:
-            # Fallback to movie mean or global mean
-            movie_ratings = self._X[:, full_movie_idx]
-            valid_movie = movie_ratings > 0
-            return np.mean(movie_ratings[valid_movie]) if valid_movie.sum() > 0 else self._global_mean
-            
-        return np.average(neighbor_ratings[valid], weights=similarities[valid])
-    
-    def predict_batch(self, user_ids, movie_ids):
-        """Vectorized rating prediction for multiple user-movie pairs."""
-        if not getattr(self, 'is_fitted_', False):
-            raise RuntimeError("Estimator not fitted. Call .fit() first.")
-            
-        # Force inputs to standard Python ints to match dict keys
-        user_ids = np.array([int(u) for u in user_ids], dtype=int)
-        movie_ids = np.array([int(m) for m in movie_ids], dtype=int)
-        predictions = np.full(len(user_ids), self._global_mean)
-        
-        # Vectorized validation using boolean indexing
-        valid_mask = np.array([
-            (u in self._valid_user_ids) and (m in self._valid_movie_ids)
-            for u, m in zip(user_ids, movie_ids)
-        ])
-        
-        if not np.any(valid_mask):
-            return predictions
-            
-        v_users = user_ids[valid_mask]
-        v_movies = movie_ids[valid_mask]
-        
-        # Precompute item means for fallback
-        item_ratings_sum = np.sum(self._X, axis=0)
-        item_ratings_count = np.sum(self._X > 0, axis=0)
-        item_means = np.where(item_ratings_count > 0, 
-                              item_ratings_sum / item_ratings_count, 
-                              self._global_mean)
-        
-        # Group by unique users to minimize NN calls
-        unique_users, inverse_indices = np.unique(v_users, return_inverse=True)
-        predictions_valid = np.empty(len(v_users))
-        
-        # Batch scale & find neighbors
-        unique_full_indices = [self._user_to_idx[uid] for uid in unique_users]
-        X_unique_scaled = self._scaler.transform(self._X[unique_full_indices])
-        dists_all, neighbors_all = self._nn.kneighbors(X_unique_scaled)
-        similarities_all = 1 - dists_all
-        
-        # Compute predictions per unique user
-        for u_idx, u_id in enumerate(unique_users):
-            sims = similarities_all[u_idx]
-            neighbor_indices = neighbors_all[u_idx]
-            
-            user_positions = np.where(inverse_indices == u_idx)[0]
-            target_movie_ids = v_movies[user_positions]
-            
-            target_movie_indices = np.array([self._movie_to_idx[mid] for mid in target_movie_ids])
-            
-            neighbor_ratings = self._X[neighbor_indices][:, target_movie_indices]
-            valid_mask_movies = neighbor_ratings > 0
-            
-            weights = sims[:, np.newaxis] * valid_mask_movies
-            numerators = np.sum(weights * neighbor_ratings, axis=0)
-            denominators = np.sum(weights, axis=0)
-            
-            preds = np.where(denominators > 0, 
-                             numerators / denominators, 
-                             item_means[target_movie_indices])
-            
-            predictions_valid[user_positions] = preds
-            
-        predictions[valid_mask] = predictions_valid
-        return predictions
-        
-        
-    def recommend(self, user_id, n_rec=5):
-        """Return top-N recommended movies for a user."""
-        if not getattr(self, 'is_fitted_', False):
-            raise RuntimeError("Estimator not fitted. Call .fit() first.")
-            
-        if user_id not in self._user_to_cluster:
-            return ["User not in training set or too few ratings"]
-            
-        full_user_idx = self._user_ids.index(user_id)
-        user_vec_scaled = self._scaler.transform(self._X[full_user_idx].reshape(1, -1))
-        cluster_id = self._user_to_cluster[user_id]
-        
-        # Filter to users in the same cluster (reduces noise)
-        cluster_mask = np.array([self._user_to_cluster.get(uid) == cluster_id for uid in self._user_ids])
-        if cluster_mask.sum() < 5:
-            cluster_mask = np.ones(len(self._user_ids), dtype=bool)  # Fallback to all users
-            
-        X_cluster = self._X_scaled[cluster_mask]
-        nn_cluster = NearestNeighbors(n_neighbors=min(self.n_neighbors, X_cluster.shape[0]), 
-                                      metric='cosine', algorithm='brute')
-        nn_cluster.fit(X_cluster)
-        
-        dists, idxs = nn_cluster.kneighbors(user_vec_scaled)
-        similarities = 1 - dists[0]
-        
-        rec_scores = {}
-        cluster_train_user_ids = [uid for uid, mask in zip(self._user_ids, cluster_mask) if mask]
-        
-        for i, sim in zip(idxs[0], similarities):
-            su_id = cluster_train_user_ids[i]
-            su_full_idx = self._user_ids.index(su_id)
-            su_vec = self._X[su_full_idx]
-            
-            target_rated = np.where(self._X[full_user_idx] > 0)[0]
-            similar_rated = np.where(su_vec > 0)[0]
-            unseen_indices = np.setdiff1d(similar_rated, target_rated)
-            
-            for midx in unseen_indices:
-                mid = self._movie_ids[midx]
-                rec_scores[mid] = rec_scores.get(mid, 0) + (su_vec[midx] * sim)
-                
-        top_movies = sorted(rec_scores.items(), key=lambda x: x[1], reverse=True)[:n_rec]
-        top_ids = [m[0] for m in top_movies]
-        return self._movies_df[self._movies_df['MovieID'].isin(top_ids)][['MovieID', 'Title']].values.tolist()
 
 class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
     def __init__(self, n_neighbors=10, min_ratings=20, alpha=0.7):
@@ -243,6 +57,10 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._user_ids = [int(uid) for uid in df.index]
         self._movie_ids = [int(mid) for mid in df.columns]
         self._X = df.values
+        # Precompute per-user mean rating (ignores 0/unrated)
+        user_rating_counts = np.sum(self._X > 0, axis=1)
+        self._user_means = np.sum(self._X, axis=1) / np.maximum(user_rating_counts, 1)
+        
         self._movies_df = movies_df.copy()
         self._global_mean = float(np.mean(self._X[self._X > 0]))
         self._valid_user_ids = set(self._user_ids)
@@ -322,64 +140,97 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         return content_preds
 
     def predict_batch(self, user_ids, movie_ids, alpha=None):
-        """Hybrid prediction: blends CF + Content."""
+        """Hybrid rating prediction: CF + Content (bug-free)"""
         if not getattr(self, 'is_fitted_', False):
             raise RuntimeError("Estimator not fitted. Call .fit() first.")
             
-        cf_preds = np.full(len(user_ids), self._global_mean)
-        
-        # CF prediction (reuse existing logic)
         user_ids_arr = np.array([int(u) for u in user_ids], dtype=int)
         movie_ids_arr = np.array([int(m) for m in movie_ids], dtype=int)
+        
+        # Initialize with global mean
+        cf_preds = np.full(len(user_ids_arr), self._global_mean)
+        content_preds = np.full(len(user_ids_arr), self._global_mean)
+        
+        # 1. Identify valid (user, movie) pairs
         valid_mask = np.array([(u in self._valid_user_ids) and (m in self._valid_movie_ids) 
                                for u, m in zip(user_ids_arr, movie_ids_arr)])
+        valid_indices = np.where(valid_mask)[0]
         
-        if np.any(valid_mask):
-            v_users = user_ids_arr[valid_mask]
-            v_movies = movie_ids_arr[valid_mask]
+        if len(valid_indices) == 0:
+            return cf_preds
             
-            unique_users, inv_idx = np.unique(v_users, return_inverse=True)
-            unique_full_idx = [self._user_to_idx[u] for u in unique_users]
-            X_scaled_batch = self._scaler.transform(self._X[unique_full_idx])
-            dists, neighs = self._nn.kneighbors(X_scaled_batch)
-            sims = 1 - dists
-            
-            item_sum = np.sum(self._X, axis=0)
-            item_cnt = np.sum(self._X > 0, axis=0)
-            item_means = np.where(item_cnt > 0, item_sum / item_cnt, self._global_mean)
-            
-            preds_cf = np.full(len(v_users), self._global_mean)
-            for u_idx, u_id in enumerate(unique_users):
-                pos = np.where(inv_idx == u_idx)[0]
-                m_idx = np.array([self._movie_to_idx[mid] for mid in v_movies[pos]])
-                neigh_ratings = self._X[neighs[u_idx]][:, m_idx]
-                valid = neigh_ratings > 0
-                w = sims[u_idx][:, None] * valid
-                num = np.sum(w * neigh_ratings, axis=0)
-                den = np.sum(w, axis=0)
-                preds_cf[pos] = np.where(den > 0, num / den, item_means[m_idx])
-                
-            cf_preds[valid_mask] = preds_cf
-
-        # Content prediction
-        content_preds = self._predict_content_batch(user_ids_arr, movie_ids_arr)
+        v_users = user_ids_arr[valid_indices]
+        v_movies = movie_ids_arr[valid_indices]
         
-        # Adaptive blending: lean toward content if CF signal is weak
+        # 2. CF: Find neighbors & compute weighted ratings
+        unique_users, inv_idx = np.unique(v_users, return_inverse=True)
+        unique_full_idx = [self._user_to_idx[u] for u in unique_users]
+        X_scaled_batch = self._scaler.transform(self._X[unique_full_idx])
+        dists, neighs = self._nn.kneighbors(X_scaled_batch)
+        sims = 1 - dists
+        
+        # Precompute safe item means
+        item_cnt = np.sum(self._X > 0, axis=0)
+        item_means = np.where(item_cnt > 0, np.sum(self._X, axis=0) / item_cnt, self._global_mean)
+        
+        # Allocate CF predictions only for valid pairs
+        cf_preds_valid = np.full(len(valid_indices), self._global_mean)
+        
+        for u_idx, u_id in enumerate(unique_users):
+            pos = np.where(inv_idx == u_idx)[0]
+            m_idx = np.array([self._movie_to_idx[mid] for mid in v_movies[pos]])
+            
+            u_full_idx = unique_full_idx[u_idx]
+            target_user_mean = self._user_means[u_full_idx]
+            
+            neigh_ratings = self._X[neighs[u_idx]][:, m_idx]
+            neighbor_means = self._user_means[neighs[u_idx]][:, None]  # Shape: (k, 1)
+            
+            # ✅ CENTERED CF: Subtract neighbor baselines before weighting
+            centered_ratings = neigh_ratings - neighbor_means
+            valid_mask_ratings = neigh_ratings > 0
+            w = sims[u_idx][:, None] * valid_mask_ratings
+            
+            num = np.sum(w * centered_ratings, axis=0)
+            den = np.sum(w, axis=0)
+            
+            # Predict = target_user_mean + weighted_adjustment
+            fallback = np.where(den > 0, target_user_mean, item_means[m_idx])
+            cf_preds_valid[pos] = np.where(den > 0, target_user_mean + num / np.maximum(den, 1e-9), fallback)            
+                # ✅ CORRECT ASSIGNMENT: No chained indexing copy bug
+        cf_preds[valid_indices] = cf_preds_valid
+        
+        # 3. Content prediction (for valid pairs)
+        content_preds_valid = np.full(len(valid_indices), self._global_mean)
+        u_content_idx = np.array([self._user_to_idx.get(u, -1) for u in v_users])
+        m_content_idx = np.array([self._movie_to_all_idx.get(m, -1) for m in v_movies])
+        
+        c_valid = (u_content_idx >= 0) & (m_content_idx >= 0)
+        if np.any(c_valid):
+            profiles = self._user_genre_profiles[u_content_idx[c_valid]]
+            movie_vecs = self._movie_genre_matrix[m_content_idx[c_valid]]
+            sims_c = np.sum(profiles * movie_vecs, axis=1)
+            # Center content around global mean to avoid dragging CF down
+            content_preds_valid[c_valid] = self._global_mean + (sims_c - sims_c.mean()) * 1.5
+            
+        content_preds[valid_indices] = content_preds_valid
+        
+        # 4. Sanitize & Blend
+        cf_preds = np.nan_to_num(cf_preds, nan=self._global_mean, posinf=5.0, neginf=1.0)
+        content_preds = np.nan_to_num(content_preds, nan=self._global_mean, posinf=5.0, neginf=1.0)
+        
         alpha = alpha or self.alpha
-        # If CF prediction equals global mean (cold/uncertain), shift weight to content
-        cf_is_weak = (np.abs(cf_preds - self._global_mean) < 0.1)
-        final_alpha = np.where(cf_is_weak, 0.3, alpha)
-        
-        return final_alpha * cf_preds + (1 - final_alpha) * content_preds
-    
-    def predict(self, user_id, movie_id, alpha=None):
+        final_preds = alpha * cf_preds + (1 - alpha) * content_preds
+        return np.clip(final_preds, 1, 5)
+
+    def predict(self, user_id, movie_id, alpha=alpha):
         """Predict rating for a user-movie pair. 
         Returns float for scalar inputs, numpy array for list/array inputs."""
         preds = self.predict_batch(np.atleast_1d(user_id), np.atleast_1d(movie_id), alpha=alpha)
         # Return scalar if single input, else return full array
         return preds[0] if np.ndim(user_id) == 0 else preds
 
-    def recommend(self, user_id, n_rec=5, alpha=None):
+    def recommend(self, user_id, n_rec=5, alpha=alpha):
         """Hybrid top-N recommendations."""
         if not getattr(self, 'is_fitted_', False):
             raise RuntimeError("Estimator not fitted. Call .fit() first.")
@@ -462,7 +313,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         pred = self._global_mean + self._user_bias[u_idx] + self._item_bias[m_idx]
         return np.clip(pred, 1, 5)  # Ensure rating stays in valid range
 
-def cross_validate_recommender(model_class, ratings_df, movies_df, n_splits=5, **model_params):
+def cross_validate_recommender(model_class, ratings_df, movies_df, n_splits=5, alpha=alpha, **model_params):
     """Run K-Fold CV on explicit ratings. Returns list of fold RMSEs."""
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     fold_scores = []
@@ -487,7 +338,7 @@ def cross_validate_recommender(model_class, ratings_df, movies_df, n_splits=5, *
                 continue
                 
             # Fast vectorized prediction
-            preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values)
+            preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values, alpha=alpha)
             rmse = np.sqrt(mean_squared_error(valid_test['Rating'].values, preds))
             fold_scores.append(rmse)
             # print(f"Fold {fold_idx+1}: RMSE = {rmse:.3f} ({len(valid_test)} pairs)")
@@ -538,52 +389,99 @@ def kmeans_elbow(X, scaler):
     plt.ylabel("WCSS")
     plt.show()
 
-
-def main():
-    users, movies, ratings = load_data(dataset_folder)
-    train_ratings, test_ratings = train_test_split(ratings, test_size=0.2, random_state=42)
-
+def evaluate_with_coverage(ratings_df, movies_df, min_r, alpha=0.7):
+    """Evaluate RMSE + report coverage metrics."""
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import mean_squared_error
+    import numpy as np
     
+    train_df, test_df = train_test_split(ratings_df, test_size=0.2, random_state=42)
+    
+    model = HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=min_r, alpha=alpha)
+    model.fit(train_df, movies_df)
+    
+    # Filter test to seen users/movies
+    valid_test = test_df[
+        (test_df['UserID'].isin(model._user_ids)) & 
+        (test_df['MovieID'].isin(model._movie_ids))
+    ]
+    
+    # Compute metrics
+    preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values)
+    rmse = np.sqrt(mean_squared_error(valid_test['Rating'], preds))
+    
+    # Coverage metrics
+    user_coverage = len(model._user_ids) / ratings_df['UserID'].nunique() * 100
+    movie_coverage = len(model._movie_ids) / movies_df['MovieID'].nunique() * 100
+    interaction_coverage = len(valid_test) / len(test_df) * 100
+    
+    return {
+        'min_ratings': min_r,
+        'rmse': rmse,
+        'user_coverage_pct': user_coverage,
+        'movie_coverage_pct': movie_coverage,
+        'interaction_coverage_pct': interaction_coverage,
+        'n_users': len(model._user_ids),
+        'n_movies': len(model._movie_ids)
+    }
+
+# this lets us get evaluation metrics easily
+def run_mr_sweep(ratings, movies):
+    results = []
+    for mr in [5, 10, 20, 50, 100, 200, 500]:
+        metrics = evaluate_with_coverage(ratings, movies, min_r=mr, alpha=0.7)
+        results.append(metrics)
+        print(f"min_ratings={mr:3d} | RMSE={metrics['rmse']:.3f} | "
+              f"Users:{metrics['user_coverage_pct']:5.1f}% | "
+              f"Movies:{metrics['movie_coverage_pct']:5.1f}% | "
+              f"Interactions:{metrics['interaction_coverage_pct']:5.1f}%")
+
+#this helps to tune in the default alpha value
+def run_alpha_sweep(train_ratings, test_ratings, movies):
     model = HybridUserClusterKNNRecommender(n_neighbors=num_neighbors, min_ratings=min_ratings)
     model.fit(train_ratings, movies)
     
-    sample_user = 4200
-    sample_movie = model._movie_ids[0]
-    print(f"Predicted rating for User {sample_user} on Movie {sample_movie}: {model.predict(sample_user, sample_movie):.2f}")
-    print(f"\nTop 5 recommendations for User {sample_user}:")
-    for mid, title in model.recommend(sample_user, n_rec=5):
-        print(f"- {title} (ID: {mid})")    
+    #ensure valid_test is properly aligned
+    valid_test = test_ratings[
+        (test_ratings['UserID'].isin(model._user_ids)) & 
+        (test_ratings['MovieID'].isin(model._movie_ids))
+    ]
+    
+    # test different levels of content/CF blending
+    alphas = [0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]
+    for a in alphas:
+        preds = model.predict_batch(valid_test['UserID'].values, valid_test['MovieID'].values, alpha=a)
+        rmse = np.sqrt(mean_squared_error(valid_test['Rating'], preds))
+        nans = np.isnan(preds).sum()
+        print(f"α={a:.2f} | RMSE={rmse:.3f} | NaNs={nans}")
 
-    param_grid = {
-        'n_neighbors': [19, 20, 25],
-        'min_ratings': [19, 20, 25],
-        'alpha': [0.9]
-    }
-    
-    best_mean_rmse = float('inf')
-    best_params = None
-    results = []
-    
-    for n_n in param_grid['n_neighbors']:
-        for min_r in param_grid['min_ratings']:
-            for a in param_grid['alpha']:
-                print(f"\n🔍 Evaluating: n_neighbors={n_n}, min_ratings={min_r}, alpha={a}")
-                try:
-                    scores = cross_validate_recommender(
-                        HybridUserClusterKNNRecommender,
-                        ratings, movies,
-                        n_splits=5,
-                        n_neighbors=n_n, min_ratings=min_r, alpha=a
-                    )
-                    mean_r = np.mean(scores)
-                    results.append({'n_neighbors': n_n, 'min_ratings': min_r, 'alpha': a, 'mean_rmse': mean_r})
-                    if mean_r < best_mean_rmse:
-                        best_mean_rmse = mean_r
-                        best_params = {'n_neighbors': n_n, 'min_ratings': min_r, 'alpha': a}
-                except Exception as e:
-                    print(f"   Skipped: {e}")
-    
-    print(f"\n🏆 Best CV RMSE: {best_mean_rmse:.3f} | Params: {best_params}")
+def run_alpha_sweep_cross(ratings,movies):
+    alphas = [0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0]
+    for a in alphas:
+        score = cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies,5, alpha, n_neighbors=num_neighbors, min_ratings=min_ratings)
+        mean_rmse = np.mean(score)
+        rmse_std = np.std(score)
+        print(f"α={a:.2f} | RMSE={mean_rmse:.3f} +/- {rmse_std:.3f}")
 
+    
+def main():
+    users, movies, ratings = load_data(dataset_folder)
+    train_ratings, test_ratings = train_test_split(ratings, test_size=0.2, random_state=42)
+    
+    report = generate_coverage_report(
+    ratings_df=ratings,
+    movies_df=movies,
+    alpha=0.7,
+    output_plot=True,  # Saves PNG/PDF automatically
+    verbose=True
+    )
+    
+    # Access results
+    print(f"Best RMSE: {report['results_df']['rmse'].min():.3f}")
+    if 'sweet_spot' in report:
+        print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
+        
+
+    
 if __name__ == '__main__':
     main()
