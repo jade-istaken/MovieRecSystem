@@ -196,7 +196,7 @@ def plot_grid_search_heatmap(
     results_df: pd.DataFrame,
     metric: str = 'mean_rmse',
     annotate_values: bool = True,
-    highlight_best: bool = True,
+    highlight_best: bool = False,
     coverage_overlay: bool = False,
     min_ratings_log_scale: bool = False,
     cmap: str = 'viridis_r',  # Reversed: lower RMSE = darker

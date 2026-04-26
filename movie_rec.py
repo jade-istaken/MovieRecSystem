@@ -20,16 +20,16 @@ from sklearn.model_selection import KFold
 
 from plotting import generate_coverage_report
 from grid_search_viz import generate_grid_search_report
-
+from baselines import generate_baseline_report
 #global behavioral variables go here 
 dataset_folder = 'dataset'
-min_ratings = 30 #threshold for minimum ratings
-num_neighbors = 25
-alpha=0.75
+min_ratings = 40 #threshold for minimum ratings
+num_neighbors = 350
+alpha=0.90
 
 
 class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
-    def __init__(self, n_neighbors=10, min_ratings=20, alpha=0.7):
+    def __init__(self, n_neighbors=10, min_ratings=20, alpha=0.9):
         self.n_neighbors = n_neighbors
         self.min_ratings = min_ratings
         self.alpha = alpha  # Weight for CF (1-alpha for Content)
@@ -220,7 +220,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         cf_preds = np.nan_to_num(cf_preds, nan=self._global_mean, posinf=5.0, neginf=1.0)
         content_preds = np.nan_to_num(content_preds, nan=self._global_mean, posinf=5.0, neginf=1.0)
         
-        alpha = alpha or self.alpha
+        alpha = alpha
         final_preds = alpha * cf_preds + (1 - alpha) * content_preds
         return np.clip(final_preds, 1, 5)
 
@@ -465,12 +465,16 @@ def run_alpha_sweep_cross(ratings,movies):
     alpha_scores = []
     alpha_stds = []
     for a in alphas:
-        score = cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies,5, alpha, n_neighbors=num_neighbors, min_ratings=min_ratings)
+        score = cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies,5, alpha=a, n_neighbors=num_neighbors, min_ratings=min_ratings)
         mean_rmse = np.mean(score)
         rmse_std = np.std(score)
         print(f"α={a:.2f} | RMSE={mean_rmse:.3f} +/- {rmse_std:.3f}")
         alpha_scores.append(mean_rmse)
         alpha_stds.append(rmse_std)
+    plt.plot(alphas, alpha_scores)
+    plt.xlabel("α values")
+    plt.ylabel("RMSE")
+    plt.title("α-blending vs. RMSE")
     return alpha_scores, alpha_stds
         
 
@@ -494,16 +498,33 @@ def main():
     #     print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
     
     #generate grid search results
-    report = generate_grid_search_report(
-        model_class=HybridUserClusterKNNRecommender,
+    # report = generate_grid_search_report(
+    #     model_class=HybridUserClusterKNNRecommender,
+    #     ratings_df=ratings,
+    #     movies_df=movies,
+    #     min_ratings_values=[30, 40, 50],
+    #     n_neighbors_values=[200, 250, 300, 350, 400, 450, 500],
+    #     alpha=0.75,
+    #     n_splits=5,  # Use 5 for final report
+    #     verbose=True
+    # )
+    
+    # run_alpha_sweep_cross(ratings, movies)
+    # cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies, n_neighbors=num_neighbors, min_ratings=min_ratings)
+    
+    #baseline comparisons 
+    report = generate_baseline_report(
         ratings_df=ratings,
         movies_df=movies,
-        min_ratings_values=[5, 10, 20, 30, 50],
-        n_neighbors_values=[5, 10, 20, 30, 50],
-        alpha=0.75,
-        n_splits=5,  # Use 5 for final report
+        hybrid_rmse=0.897,        # Your model's RMSE
+        hybrid_coverage=91.9,     # Your model's coverage
+        min_ratings_values=[40],
         verbose=True
     )
+    
+    # Access results programmatically
+    print(report['summary'])
+    print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
 
     
 if __name__ == '__main__':
