@@ -31,10 +31,11 @@ alpha=0.90
 
 
 class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
-    def __init__(self, n_neighbors=10, min_ratings=20, alpha=0.9):
+    def __init__(self, n_neighbors=10, min_ratings=20, alpha=0.9, longtail_boost=0.0):
         self.n_neighbors = n_neighbors
         self.min_ratings = min_ratings
         self.alpha = alpha  # Weight for CF (1-alpha for Content)
+        self.longtail_boost = longtail_boost
 
         # CF estimators
         self._scaler = StandardScaler()
@@ -255,12 +256,16 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         # Predict hybrid scores for all unseen movies at once
         user_batch = np.full(len(unseen_movie_ids), user_id)
         scores = self.predict_batch(user_batch, unseen_movie_ids, alpha=alpha)
-        
-        
+        if self.longtail_boost > 0.0 and hasattr(self, '_movie_popularity'):
+            pops = np.array([self._movie_popularity.get(int(mid), 1) for mid in unseen_movie_ids])
+            # Inverse-log scaling + safety clamp
+            scores = scores * (1.0 + np.clip(self.longtail_boost / np.log1p(pops), 0, 2.0))
+
         top_indices = np.argsort(scores)[::-1][:n_rec]
         top_mid = unseen_movie_ids[top_indices]
         
         return self._movies_df[self._movies_df['MovieID'].isin(top_mid)][['MovieID', 'Title']].values.tolist()
+    
     def _compute_biases(self, ratings_df, lambda_reg=15):
         """Compute user and item biases via regularized alternating least squares."""
         # Initialize
@@ -541,12 +546,13 @@ def main():
     # print(report['summary'])
     # print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
 
-    #evaluate the ranking/recommendation performance
+    # evaluate the ranking/recommendation performance
     models = {
     'Random': RandomRecommender(random_state=42),
     'Popularity (count)': PopularityRecommender(popularity_metric='count', min_ratings=5),
     'UserMean+Pop': UserMeanPopularityRecommender(lambda_reg=15.0),
-    'Our Model': HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=10, alpha=0.7),
+    'Our Model': HybridUserClusterKNNRecommender(n_neighbors=350, min_ratings=10, alpha=0.7, longtail_boost=0.0),
+    'Our Model + Longtail Boosting':  HybridUserClusterKNNRecommender(n_neighbors=350, min_ratings=10, alpha=0.7, longtail_boost = 0.3)
     }
     
     # Run comparison (use n_folds=3 for speed; increase to 5 for final report)
@@ -554,12 +560,25 @@ def main():
     comparison = compare_ranking_models(
         models, ratings, movies,
         k_values=[5, 10, 20],
-        n_folds=3,
+        n_folds=5,
         relevance_threshold=4.0,
         verbose=True
     )
     
     print_ranking_comparison_summary(comparison, k=10, cold_threshold=20)
+    
+    # Verify boost is active
+    # model_boosted = HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=10, alpha=0.7, longtail_boost=0.3)
+    # print(f"Boost value: {model_boosted.longtail_boost}")  # Should be 0.3
+    
+    # # Test on a single warm user
+    # uid = 10
+    # recs_base = HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=10, alpha=0.7, longtail_boost=0.0).fit(train_ratings, movies).recommend(uid, n_rec=20)
+    # recs_boost = model_boosted.fit(train_ratings, movies).recommend(uid, n_rec=20)
+    
+    # print(f"Base recs (first 5): {[r[0] for r in recs_base[:5]]}")
+    # print(f"Boost recs (first 5): {[r[0] for r in recs_boost[:5]]}")
+    # print(f"Same top-10? {set(r[0] for r in recs_base[:10]) == set(r[0] for r in recs_boost[:10])}")
     
 if __name__ == '__main__':
     main()
