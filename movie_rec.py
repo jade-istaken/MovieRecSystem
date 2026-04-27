@@ -21,6 +21,8 @@ from sklearn.model_selection import KFold
 from plotting import generate_coverage_report
 from grid_search_viz import generate_grid_search_report
 from baselines import generate_baseline_report
+from ranking_eval import compare_ranking_models, plot_model_comparison, print_ranking_comparison_summary
+from baseline_rankings import RandomRecommender, PopularityRecommender, UserMeanPopularityRecommender
 #global behavioral variables go here 
 dataset_folder = 'dataset'
 min_ratings = 40 #threshold for minimum ratings
@@ -87,6 +89,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         self._user_genre_profiles = self._compute_user_profiles(ratings_df)
 
         self.is_fitted_ = True
+        self._movie_popularity = ratings_df.groupby('MovieID').size().to_dict()
         return self
 
     def _compute_user_profiles(self, ratings_df):
@@ -252,6 +255,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
         # Predict hybrid scores for all unseen movies at once
         user_batch = np.full(len(unseen_movie_ids), user_id)
         scores = self.predict_batch(user_batch, unseen_movie_ids, alpha=alpha)
+        
         
         top_indices = np.argsort(scores)[::-1][:n_rec]
         top_mid = unseen_movie_ids[top_indices]
@@ -476,7 +480,18 @@ def run_alpha_sweep_cross(ratings,movies):
     plt.ylabel("RMSE")
     plt.title("α-blending vs. RMSE")
     return alpha_scores, alpha_stds
-        
+
+def compute_coverage(ranking_metrics_df, total_eligible_users):
+    """
+    Compute recommendation coverage: fraction of eligible test users served.
+    
+    Args:
+        ranking_metrics_df: Output from evaluate_ranking_cv()
+        total_eligible_users: Number of users in the test split who had ≥1 relevant item
+    """
+    # n_users column = users who received valid recommendations for this (fold, k)
+    served_users = ranking_metrics_df['n_users'].mean()
+    return served_users / total_eligible_users * 100 if total_eligible_users > 0 else 0
 
     
 def main():
@@ -513,19 +528,38 @@ def main():
     # cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies, n_neighbors=num_neighbors, min_ratings=min_ratings)
     
     #baseline comparisons 
-    report = generate_baseline_report(
-        ratings_df=ratings,
-        movies_df=movies,
-        hybrid_rmse=0.897,        # Your model's RMSE
-        hybrid_coverage=91.9,     # Your model's coverage
-        min_ratings_values=[40],
+    # report = generate_baseline_report(
+    #     ratings_df=ratings,
+    #     movies_df=movies,
+    #     hybrid_rmse=0.897,        # Your model's RMSE
+    #     hybrid_coverage=91.9,     # Your model's coverage
+    #     min_ratings_values=[40],
+    #     verbose=True
+    # )
+    
+    # # Access results programmatically
+    # print(report['summary'])
+    # print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
+
+    #evaluate the ranking/recommendation performance
+    models = {
+    'Random': RandomRecommender(random_state=42),
+    'Popularity (count)': PopularityRecommender(popularity_metric='count', min_ratings=5),
+    'UserMean+Pop': UserMeanPopularityRecommender(lambda_reg=15.0),
+    'Our Model': HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=10, alpha=0.7),
+    }
+    
+    # Run comparison (use n_folds=3 for speed; increase to 5 for final report)
+    print("🔍 Running ranking comparison (3-fold CV, K=[5,10,20])...")
+    comparison = compare_ranking_models(
+        models, ratings, movies,
+        k_values=[5, 10, 20],
+        n_folds=3,
+        relevance_threshold=4.0,
         verbose=True
     )
     
-    # Access results programmatically
-    print(report['summary'])
-    print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
-
+    print_ranking_comparison_summary(comparison, k=10, cold_threshold=20)
     
 if __name__ == '__main__':
     main()
