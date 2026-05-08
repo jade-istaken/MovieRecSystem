@@ -79,7 +79,8 @@ def evaluate_single_config(
             # Predict and evaluate
             preds = model.predict_batch(
                 valid_test['UserID'].values,
-                valid_test['MovieID'].values
+                valid_test['MovieID'].values,
+                alpha=alpha
             )
             rmse = np.sqrt(mean_squared_error(valid_test['Rating'], preds))
             coverage = len(valid_test) / len(test_df) * 100
@@ -395,7 +396,7 @@ def generate_grid_search_report(
         n_neighbors_values = [5, 10, 20, 30, 50]
     
     if verbose:
-        print(f"🚀 Starting grid search: {len(min_ratings_values)} × {len(n_neighbors_values)} = "
+        print(f"Starting grid search: {len(min_ratings_values)} × {len(n_neighbors_values)} = "
               f"{len(min_ratings_values)*len(n_neighbors_values)} configurations")
         print(f"   Model: {model_class.__name__}, α={alpha}, {n_splits}-fold CV\n")
     
@@ -431,7 +432,7 @@ def generate_grid_search_report(
     # Generate heatmap
     if output_plot and not results_df.empty:
         if verbose:
-            print(f"\n📊 Generating heatmap visualization...")
+            print(f"\nGenerating heatmap visualization...")
         
         fig, pivot_df = plot_grid_search_heatmap(
             results_df,
@@ -447,7 +448,7 @@ def generate_grid_search_report(
     
     # Generate text summary
     summary_lines = [
-        "\n📋 Grid Search Summary",
+        "\nGrid Search Summary",
         "=" * 50,
         f"Parameter Grid: min_ratings × n_neighbors",
         f"Configurations evaluated: {len(results_df)}",
@@ -457,7 +458,7 @@ def generate_grid_search_report(
     
     if best_config:
         summary_lines.extend([
-            "🏆 Best Configuration:",
+            "Best Configuration:",
             f"   min_ratings  = {best_config['min_ratings']}",
             f"   n_neighbors  = {best_config['n_neighbors']}",
             f"   Mean RMSE    = {best_config['mean_rmse']:.3f} ± {best_config['std_rmse']:.3f}",
@@ -475,7 +476,7 @@ def generate_grid_search_report(
                 f"(cov: {row['mean_coverage']:.1f}%)"
             )
     else:
-        summary_lines.append("⚠️ No valid configurations produced results.")
+        summary_lines.append("No valid configurations produced results.")
     
     output['summary'] = "\n".join(summary_lines)
     
@@ -520,7 +521,7 @@ if __name__ == "__main__":
     # Print best config for easy copying
     if report['best_config']:
         bc = report['best_config']
-        print(f"\n✅ Grid search complete. Recommended config:")
+        print(f"\nGrid search complete. Recommended config:")
         print(f"   HybridUserClusterKNNRecommender(")
         print(f"       min_ratings={bc['min_ratings']},")
         print(f"       n_neighbors={bc['n_neighbors']},")

@@ -1,7 +1,6 @@
 """
-baselines.py (Updated)
+baselines.py
 Cross-validation utilities for baseline recommendation models.
-All code is function-wrapped; no top-level execution.
 """
 
 import numpy as np
@@ -204,14 +203,14 @@ def compare_baselines_cv(ratings_df: pd.DataFrame, movies_df: pd.DataFrame,
     results = []
     
     # 1. Global Mean
-    if verbose: print("\n🔍 Evaluating GlobalMeanBaseline...")
+    if verbose: print("\nEvaluating GlobalMeanBaseline...")
     gm = GlobalMeanBaseline()
     r = evaluate_baseline_cv(gm, ratings_df, movies_df, n_splits=n_splits, verbose=verbose)
     results.append({'model': 'GlobalMean', 'min_ratings': None, 'mean_rmse': r.mean_rmse, 
                     'std_rmse': r.std_rmse, 'mean_coverage': r.mean_coverage, 'n_folds': r.n_folds_evaluated})
     
     # 2. User Mean
-    if verbose: print("\n🔍 Evaluating UserMeanBaseline...")
+    if verbose: print("\nEvaluating UserMeanBaseline...")
     um = UserMeanBaseline()
     r = evaluate_baseline_cv(um, ratings_df, movies_df, n_splits=n_splits, verbose=verbose)
     results.append({'model': 'UserMean', 'min_ratings': None, 'mean_rmse': r.mean_rmse, 
@@ -219,14 +218,14 @@ def compare_baselines_cv(ratings_df: pd.DataFrame, movies_df: pd.DataFrame,
     
     # 3. Bias Baseline (across min_ratings)
     for min_r in min_ratings_values:
-        if verbose: print(f"\n🔍 Evaluating BiasBaseline (min_ratings={min_r})...")
+        if verbose: print(f"\nEvaluating BiasBaseline (min_ratings={min_r})...")
         bias = BiasBaseline(lambda_reg=15.0)
         r = evaluate_baseline_cv(bias, ratings_df, movies_df, n_splits=n_splits, min_ratings=min_r, verbose=verbose)
         results.append({'model': 'Bias', 'min_ratings': min_r, 'mean_rmse': r.mean_rmse, 
                         'std_rmse': r.std_rmse, 'mean_coverage': r.mean_coverage, 'n_folds': r.n_folds_evaluated})
         
     results_df = pd.DataFrame(results)
-    if verbose: print(f"\n📊 Baseline Comparison Summary:\n{results_df.to_string(index=False)}")
+    if verbose: print(f"\nBaseline Comparison Summary:\n{results_df.to_string(index=False)}")
     return results_df
 
 
@@ -290,49 +289,15 @@ def generate_baseline_report(ratings_df: pd.DataFrame, movies_df: pd.DataFrame,
                                                     hybrid_coverage=hybrid_coverage, show_plot=verbose)
     
     best_bias = results_df[results_df['model'] == 'Bias'].loc[results_df[results_df['model'] == 'Bias']['mean_rmse'].idxmin()] if (results_df['model'] == 'Bias').any() else None
-    summary_lines = ["\n📋 Baseline Evaluation Summary", "=" * 40, f"Cross-validation: {n_splits}-fold", f"Total ratings: {len(ratings_df):,}", "", "Results:"]
+    summary_lines = ["\nBaseline Evaluation Summary", "=" * 40, f"Cross-validation: {n_splits}-fold", f"Total ratings: {len(ratings_df):,}", "", "Results:"]
     for _, row in results_df.iterrows():
         m = row['model'] + (f" (min_ratings={int(row['min_ratings'])})" if pd.notna(row['min_ratings']) else "")
         summary_lines.append(f"  • {m:30s} → RMSE: {row['mean_rmse']:.3f} ± {row['std_rmse']:.3f}  (coverage: {row['mean_coverage']:.1f}%)")
     if hybrid_rmse is not None:
-        summary_lines.append(f"\n  • Your Hybrid Model          → RMSE: {hybrid_rmse:.3f}  (coverage: {hybrid_coverage:.1f}%)")
+        summary_lines.append(f"\n  • Hybrid Model          → RMSE: {hybrid_rmse:.3f}  (coverage: {hybrid_coverage:.1f}%)")
         best_base_rmse = results_df['mean_rmse'].min()
-        summary_lines.append(f"\n🎯 Improvement vs. best baseline: {(best_base_rmse - hybrid_rmse)/best_base_rmse*100:+.2f}%")
+        summary_lines.append(f"\nImprovement vs. best baseline: {(best_base_rmse - hybrid_rmse)/best_base_rmse*100:+.2f}%")
     output['summary'] = "\n".join(summary_lines)
     if verbose: print(output['summary'])
     return output
 
-
-# ============================================================================
-# EXECUTION GUARD: Only run when executed as script
-# ============================================================================
-if __name__ == "__main__":
-    import sys
-    import os
-    
-    # Add parent directory to path for imports
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    
-    # Load data (adjust paths as needed)
-    ratings = pd.read_csv('reviews.dat', sep='::', engine='python', header=None,
-                          names=['UserID', 'MovieID', 'Rating', 'Timestamp'])
-    movies = pd.read_csv('movies.dat', sep='::', engine='python', header=None,
-                         encoding='latin-1', names=['MovieID', 'Title', 'Genres'])
-    
-    # Optional: provide your hybrid model's metrics for comparison
-    HYBRID_RMSE = 0.945      # Replace with your actual result
-    HYBRID_COVERAGE = 82.4   # Replace with your actual coverage
-    
-    # Generate full report
-    report = generate_baseline_report(
-        ratings_df=ratings,
-        movies_df=movies,
-        hybrid_rmse=HYBRID_RMSE,
-        hybrid_coverage=HYBRID_COVERAGE,
-        n_splits=5,
-        min_ratings_values=[5, 10, 20, 40],
-        verbose=True
-    )
-    
-    print(f"\n✅ Baseline evaluation complete.")
-    print(f"   Results saved to: baseline_comparison.png/pdf")

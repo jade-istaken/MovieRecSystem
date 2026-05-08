@@ -59,7 +59,8 @@ def evaluate_model_coverage(
     # Predict & compute RMSE
     preds = model.predict_batch(
         valid_test['UserID'].values, 
-        valid_test['MovieID'].values
+        valid_test['MovieID'].values,
+        alpha=alpha
     )
     rmse = np.sqrt(mean_squared_error(valid_test['Rating'], preds))
     

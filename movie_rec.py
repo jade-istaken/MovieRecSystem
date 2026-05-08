@@ -144,7 +144,7 @@ class HybridUserClusterKNNRecommender(BaseEstimator, ClusterMixin):
             
         return content_preds
 
-    def predict_batch(self, user_ids, movie_ids, alpha=None):
+    def predict_batch(self, user_ids, movie_ids, alpha=alpha):
         """Hybrid rating prediction: CF + Content (bug-free)"""
         if not getattr(self, 'is_fitted_', False):
             raise RuntimeError("Estimator not fitted. Call .fit() first.")
@@ -504,47 +504,47 @@ def main():
     train_ratings, test_ratings = train_test_split(ratings, test_size=0.2, random_state=42)
     
     #commented out block of code for finding the best min_Ratings number
-    # report = generate_coverage_report(
-    # ratings_df=ratings,
-    # movies_df=movies,
-    # alpha=alpha,
-    # output_plot=True,  # Saves PNG/PDF automatically
-    # verbose=True
-    # )
+    report = generate_coverage_report(
+        ratings_df=ratings,
+        movies_df=movies,
+        alpha=alpha,
+        output_plot=True,  # Saves PNG/PDF automatically
+        verbose=True
+    )
     
     # # Access results
-    # print(f"Best RMSE: {report['results_df']['rmse'].min():.3f}")
-    # if 'sweet_spot' in report:
-    #     print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
+    print(f"Best RMSE: {report['results_df']['rmse'].min():.3f}")
+    if 'sweet_spot' in report:
+        print(f"Sweet spot at min_ratings={report['sweet_spot']['min_ratings']}")
     
     #generate grid search results
-    # report = generate_grid_search_report(
-    #     model_class=HybridUserClusterKNNRecommender,
-    #     ratings_df=ratings,
-    #     movies_df=movies,
-    #     min_ratings_values=[30, 40, 50],
-    #     n_neighbors_values=[200, 250, 300, 350, 400, 450, 500],
-    #     alpha=0.75,
-    #     n_splits=5,  # Use 5 for final report
-    #     verbose=True
-    # )
+    report = generate_grid_search_report(
+        model_class=HybridUserClusterKNNRecommender,
+        ratings_df=ratings,
+        movies_df=movies,
+        min_ratings_values=[30, 40, 50],
+        n_neighbors_values=[200, 250, 300, 350, 400, 450, 500],
+        alpha=0.75,
+        n_splits=5,  # Use 5 for final report
+        verbose=True
+    )
     
-    # run_alpha_sweep_cross(ratings, movies)
-    # cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies, n_neighbors=num_neighbors, min_ratings=min_ratings)
+    run_alpha_sweep_cross(ratings, movies)
+    cross_validate_recommender(HybridUserClusterKNNRecommender, ratings, movies, n_neighbors=num_neighbors, min_ratings=min_ratings)
     
     #baseline comparisons 
-    # report = generate_baseline_report(
-    #     ratings_df=ratings,
-    #     movies_df=movies,
-    #     hybrid_rmse=0.897,        # Your model's RMSE
-    #     hybrid_coverage=91.9,     # Your model's coverage
-    #     min_ratings_values=[40],
-    #     verbose=True
-    # )
+    report = generate_baseline_report(
+        ratings_df=ratings,
+        movies_df=movies,
+        hybrid_rmse=0.897,        # Your model's RMSE
+        hybrid_coverage=91.9,     # Your model's coverage
+        min_ratings_values=[40],
+        verbose=True
+    )
     
     # # Access results programmatically
-    # print(report['summary'])
-    # print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
+    print(report['summary'])
+    print(f"\nBest baseline RMSE: {report['results_df']['mean_rmse'].min():.3f}")
 
     # evaluate the ranking/recommendation performance
     models = {
