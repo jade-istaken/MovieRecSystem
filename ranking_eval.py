@@ -17,10 +17,7 @@ warnings.filterwarnings('ignore')
 DEFAULT_DPI = 300
 DEFAULT_FIGSIZE = (10, 6)
 
-
-# ============================================================================
-# CORE METRICS
-# ============================================================================
+# Core Metrics
 
 def define_relevance(rating: float, threshold: float = 4.0, 
                      relative: bool = False, user_mean: Optional[float] = None) -> bool:
@@ -105,9 +102,7 @@ def evaluate_user_recommendations(
     }
 
 
-# ============================================================================
-# HOLDOUT SPLIT (LEAKAGE-FREE)
-# ============================================================================
+#Holdout Split
 
 def create_holdout_split_strict(
     ratings_df: pd.DataFrame,
@@ -166,9 +161,7 @@ def create_holdout_split_strict(
     return train_df, test_relevant, user_means
 
 
-# ============================================================================
-# CROSS-VALIDATION EVALUATION
-# ============================================================================
+#CV Eval
 
 def evaluate_ranking_cv(
     model, ratings_df: pd.DataFrame, movies_df: pd.DataFrame,
@@ -199,7 +192,7 @@ def evaluate_ranking_cv(
         test_users = [eligible_users[i] for i in test_user_idx]
         
         if verbose:
-            print(f"\n📁 Fold {fold_idx+1}/{n_folds}: {len(train_users)} train, {len(test_users)} test users")
+            print(f"\nFold {fold_idx+1}/{n_folds}: {len(train_users)} train, {len(test_users)} test users")
         
         train_df = ratings_df[ratings_df['UserID'].isin(train_users)].copy()
         test_ratings_subset = ratings_df[ratings_df['UserID'].isin(test_users)].copy()
@@ -215,7 +208,7 @@ def evaluate_ranking_cv(
         try:
             model.fit(full_train, movies_df)
         except Exception as e:
-            if verbose: print(f"  ⚠️ Fit failed: {e}")
+            if verbose: print(f"  Fit failed: {e}")
             continue
         
         # Precompute fold-level stats
@@ -310,9 +303,7 @@ def evaluate_ranking_cv(
     return pd.DataFrame(results)
 
 
-# ============================================================================
-# VISUALIZATION & COMPARISON
-# ============================================================================
+#Visualization
 
 def plot_ranking_metrics(
     results_df: pd.DataFrame,
@@ -368,7 +359,7 @@ def compare_ranking_models(
     """Compare multiple recommender models on ranking metrics."""
     all_results = []
     for name, model in models.items():
-        if verbose: print(f"\n🔍 Evaluating model: {name}")
+        if verbose: print(f"\n Evaluating model: {name}")
         results = evaluate_ranking_cv(
             model, ratings_df, movies_df, k_values=k_values, n_folds=n_folds,
             test_ratio=test_ratio, relevance_threshold=relevance_threshold,
@@ -423,7 +414,7 @@ def plot_model_comparison(
 
 def debug_holdout_integrity(ratings_df, test_relevant, train_df, n_users=5):
     """Verify test-relevant items are NOT in training data."""
-    print(f"\n🔍 Debugging holdout integrity (sample {n_users} users)...")
+    print(f"\n Debugging holdout integrity (sample {n_users} users)...")
     
     issues_found = 0
     for uid in list(test_relevant.keys())[:n_users]:
@@ -437,7 +428,7 @@ def debug_holdout_integrity(ratings_df, test_relevant, train_df, n_users=5):
         # Check for leakage
         leaked = test_items & train_items
         if leaked:
-            print(f"❌ User {uid}: {len(leaked)} test items found in training: {list(leaked)[:3]}")
+            print(f" User {uid}: {len(leaked)} test items found in training: {list(leaked)[:3]}")
             issues_found += len(leaked)
         
         # Check relevance definition
@@ -446,12 +437,12 @@ def debug_holdout_integrity(ratings_df, test_relevant, train_df, n_users=5):
         missing_from_test = [m for m in relevant_by_threshold if m not in test_items and m not in train_items]
         
         if missing_from_test:
-            print(f"⚠️ User {uid}: {len(missing_from_test)} relevant items not in train OR test (dropped?)")
+            print(f" User {uid}: {len(missing_from_test)} relevant items not in train OR test (dropped?)")
     
     if issues_found == 0:
-        print("✅ No leakage detected in sample")
+        print("No leakage detected in sample")
     else:
-        print(f"❌ Found {issues_found} leaked items total in sample")
+        print(f"Found {issues_found} leaked items total in sample")
     
     return issues_found == 0
 
@@ -463,7 +454,7 @@ def print_analysis_summary(results_df, k=10, cold_threshold=20):
         
     agg = results_df[results_df['k'] == k].mean()
     
-    print(f"\n📊 Ranking Analysis Summary (K={k}, Cold < {cold_threshold} ratings)")
+    print(f"\nRanking Analysis Summary (K={k}, Cold < {cold_threshold} ratings)")
     print("-" * 60)
     print(f"Overall Hit Rate@{k}:      {agg['hit']:.3f}")
     print(f"Overall NDCG@{k}:          {agg['ndcg']:.3f}")
@@ -476,10 +467,10 @@ def print_analysis_summary(results_df, k=10, cold_threshold=20):
     # Ratio interpretation
     if pd.notna(agg.get('hit_cold')) and pd.notna(agg.get('hit_warm')) and agg['hit_warm'] > 0:
         ratio = agg['hit_cold'] / agg['hit_warm']
-        print(f"\n💡 Cold/Warm Performance Ratio: {ratio:.2f}x")
-        if ratio > 0.7: print("   ✅ Model handles sparse users well")
-        elif ratio > 0.4: print("   ⚠️ Moderate cold-start degradation (expected)")
-        else: print("   ❌ Severe cold-start drop (needs fallback)")
+        print(f"\nCold/Warm Performance Ratio: {ratio:.2f}x")
+        if ratio > 0.7: print("   Model handles sparse users well")
+        elif ratio > 0.4: print("   Moderate cold-start degradation (expected)")
+        else: print("   Severe cold-start drop (needs fallback)")
         
         
 def print_ranking_comparison_summary(
@@ -490,12 +481,12 @@ def print_ranking_comparison_summary(
     import numpy as np
     
     if comparison_df.empty:
-        print("❌ No results to display.")
+        print("No results to display.")
         return
         
     k_data = comparison_df[comparison_df['k'] == k].copy()
     if k_data.empty:
-        print(f"❌ No results found for K={k}. Available K: {sorted(comparison_df['k'].unique())}")
+        print(f"No results found for K={k}. Available K: {sorted(comparison_df['k'].unique())}")
         return
         
     # Aggregate across folds
@@ -510,7 +501,7 @@ def print_ranking_comparison_summary(
     summary.columns = ['_'.join(col).strip() for col in summary.columns.values]
     summary = summary.round(round_decimals)
     
-    print(f"\n📊 Ranking Comparison Summary (K={k})")
+    print(f"\nRanking Comparison Summary (K={k})")
     print(f"   Cold users: < {cold_threshold} training ratings | Long-tail: bottom {longtail_percentile:.0f}% by popularity")
     print("=" * 140)
     
@@ -544,7 +535,7 @@ def print_ranking_comparison_summary(
     print("=" * 140)
     
     # Interpretation guide
-    print("\n💡 Quick Interpretation Guide:")
+    print("\nQuick Interpretation Guide:")
     print("   • NDCG/Hit/Prec: Higher = better ranking quality")
     print("   • Coverage: % of eligible users who received recommendations")
     print("   • Long-Tail%: % of recommendations from niche/less-popular movies")
@@ -552,7 +543,7 @@ def print_ranking_comparison_summary(
     print("   • ± values: Standard deviation across CV folds")
     
     # Highlight best performers
-    print("\n🏆 Best per Metric (ignoring std):")
+    print("\nBest per Metric (ignoring std):")
     for metric, label in [('ndcg_mean', 'NDCG'), ('hit_mean', 'Hit Rate'), 
                           ('longtail_coverage_mean', 'Long-Tail'), ('coverage_mean', 'Coverage')]:
         if metric in summary.columns:
@@ -580,36 +571,5 @@ def sanity_check_recommendations(model, ratings_df: pd.DataFrame, movies_df: pd.
         leaked = [m for m in rec_ids if m in train_items]
         if leaked:
             leaks_found += len(leaked)
-    if leaks_found == 0 and verbose: print("✅ No training items found in recommendations")
+    if leaks_found == 0 and verbose: print("No training items found in recommendations")
     return leaks_found == 0
-
-
-# ============================================================================
-# EXECUTION GUARD
-# ============================================================================
-if __name__ == "__main__":
-    import sys, os
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from movie_rec import HybridUserClusterKNNRecommender
-    
-    ratings = pd.read_csv('dataset/ratings.dat', sep='::', engine='python', header=None, names=['UserID','MovieID','Rating','Timestamp'])
-    movies = pd.read_csv('dataset/movies.dat', sep='::', engine='python', header=None, encoding='latin-1', names=['MovieID','Title','Genres'])
-    
-    print("🔍 Running ranking evaluation (min_ratings=10, 3-fold CV)...")
-    model = HybridUserClusterKNNRecommender(n_neighbors=10, min_ratings=10, alpha=0.7)
-    
-    results = evaluate_ranking_cv(
-        model, ratings, movies,
-        k_values=[5, 10, 20], n_folds=3,
-        relevance_threshold=4.0, verbose=True
-    )
-    
-    if not results.empty:
-        print("\n📊 Results Summary:")
-        k10 = results[results['k'] == 10]
-        print(f"NDCG@10: {k10['ndcg'].mean():.3f} (valid for {k10['ndcg_valid_pct'].mean():.1f}% of users)")
-        print(f"Precision@10: {k10['precision'].mean():.3f} (valid for {k10['precision_valid_pct'].mean():.1f}% of users)")
-        print(f"Hit Rate@10: {k10['hit'].mean():.3f}")
-        print(f"Coverage: {k10['coverage'].mean()*100:.1f}%")
-        
-        plot_ranking_metrics(results, metrics=['ndcg', 'precision', 'hit'])
